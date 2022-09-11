@@ -8,9 +8,6 @@ var template = `
         <a v-if="activeAccount.owner" title="Add new bookmark" @click="showDialogAdd">
             <i class="fas fa-fw fa-plus-circle"></i>
         </a>
-        <a v-if="tags.length > 0" title="Show tags" @click="showDialogTags">
-            <i class="fas fa-fw fa-tags"></i>
-        </a>
         <a v-if="activeAccount.owner" title="Batch edit" @click="toggleEditMode">
             <i class="fas fa-fw fa-pencil-alt"></i>
         </a>
