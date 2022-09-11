@@ -1,5 +1,5 @@
 var template = `
-<div v-if="visible" class="custom-dialog-overlay" @keyup.esc="handleEscPressed">
+<div v-if="visible" class="custom-dialog-overlay">
 	<div class="custom-dialog">
 		<p class="custom-dialog-header">{{title}}</p>
 		<div class="custom-dialog-body">
