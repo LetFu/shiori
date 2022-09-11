@@ -107,7 +107,7 @@ export default {
 			tags: [],
 
 			dialogTags: {
-				visible: false,
+				visible: true,
 				editMode: false,
 				title: 'Existing Tags',
 				mainText: 'OK',
