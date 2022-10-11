@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/go-shiori/shiori/internal/core"
@@ -38,7 +42,7 @@ func importHandler(cmd *cobra.Command, args []string) {
 	}
 
 	// Prepare bookmark's ID
-	bookID, err := db.CreateNewID("bookmark")
+	bookID, err := db.CreateNewID(cmd.Context(), "bookmark")
 	if err != nil {
 		cError.Printf("Failed to create ID: %v\n", err)
 		os.Exit(1)
@@ -73,8 +77,24 @@ func importHandler(cmd *cobra.Command, args []string) {
 		url, _ := a.Attr("href")
 		strTags, _ := a.Attr("tags")
 
+		dateStr, fieldExists := a.Attr("last_modified")
+		if !fieldExists {
+			dateStr, _ = a.Attr("add_date")
+		}
+
+		// Using now as default date in case no last_modified nor add_date are present
+		modifiedDate := time.Now()
+		if dateStr != "" {
+			modifiedTsInt, err := strconv.Atoi(dateStr)
+			if err != nil {
+				cError.Printf("Skip %s: date field is not valid: %s", url, err)
+				return
+			}
+
+			modifiedDate = time.Unix(int64(modifiedTsInt), 0)
+		}
+
 		// Clean up URL
-		var err error
 		url, err = core.RemoveUTMParams(url)
 		if err != nil {
 			cError.Printf("Skip %s: URL is not valid\n", url)
@@ -91,7 +111,13 @@ func importHandler(cmd *cobra.Command, args []string) {
 			return
 		}
 
-		if _, exist := db.GetBookmark(0, url); exist {
+		_, exist, err := db.GetBookmark(cmd.Context(), 0, url)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			cError.Printf("Skip %s: Get Bookmark fail, %v", url, err)
+			return
+		}
+
+		if exist {
 			cError.Printf("Skip %s: URL already exists\n", url)
 			mapURL[url] = struct{}{}
 			return
@@ -115,10 +141,11 @@ func importHandler(cmd *cobra.Command, args []string) {
 
 		// Add item to list
 		bookmark := model.Bookmark{
-			ID:    bookID,
-			URL:   url,
-			Title: title,
-			Tags:  tags,
+			ID:       bookID,
+			URL:      url,
+			Title:    title,
+			Tags:     tags,
+			Modified: modifiedDate.Format(model.DatabaseDateFormat),
 		}
 
 		bookID++
@@ -127,7 +154,7 @@ func importHandler(cmd *cobra.Command, args []string) {
 	})
 
 	// Save bookmark to database
-	bookmarks, err = db.SaveBookmarks(bookmarks...)
+	bookmarks, err = db.SaveBookmarks(cmd.Context(), bookmarks...)
 	if err != nil {
 		cError.Printf("Failed to save bookmarks: %v\n", err)
 		os.Exit(1)

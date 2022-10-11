@@ -47,6 +47,8 @@ func downloadBookmarkContent(book *model.Bookmark, dataDir string, request *http
 
 // apiLogin is handler for POST /api/login
 func (h *handler) apiLogin(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Decode request
 	request := struct {
 		Username string `json:"username"`
@@ -96,7 +98,7 @@ func (h *handler) apiLogin(w http.ResponseWriter, r *http.Request, ps httprouter
 		Owner: true,
 	}
 
-	accounts, err := h.DB.GetAccounts(searchOptions)
+	accounts, err := h.DB.GetAccounts(ctx, searchOptions)
 	checkError(err)
 
 	if len(accounts) == 0 && request.Username == "shiori" && request.Password == "gopher" {
@@ -108,7 +110,9 @@ func (h *handler) apiLogin(w http.ResponseWriter, r *http.Request, ps httprouter
 	}
 
 	// Get account data from database
-	account, exist := h.DB.GetAccount(request.Username)
+	account, exist, err := h.DB.GetAccount(ctx, request.Username)
+	checkError(err)
+
 	if !exist {
 		panic(fmt.Errorf("username doesn't exist"))
 	}
@@ -147,6 +151,8 @@ func (h *handler) apiLogout(w http.ResponseWriter, r *http.Request, ps httproute
 
 // apiGetBookmarks is handler for GET /api/bookmarks
 func (h *handler) apiGetBookmarks(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -183,12 +189,12 @@ func (h *handler) apiGetBookmarks(w http.ResponseWriter, r *http.Request, ps htt
 	}
 
 	// Calculate max page
-	nBookmarks, err := h.DB.GetBookmarksCount(searchOptions)
+	nBookmarks, err := h.DB.GetBookmarksCount(ctx, searchOptions)
 	checkError(err)
 	maxPage := int(math.Ceil(float64(nBookmarks) / 30))
 
 	// Fetch all matching bookmarks
-	bookmarks, err := h.DB.GetBookmarks(searchOptions)
+	bookmarks, err := h.DB.GetBookmarks(ctx, searchOptions)
 	checkError(err)
 
 	// Get image URL for each bookmark, and check if it has archive
@@ -220,12 +226,14 @@ func (h *handler) apiGetBookmarks(w http.ResponseWriter, r *http.Request, ps htt
 
 // apiGetTags is handler for GET /api/tags
 func (h *handler) apiGetTags(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
 
 	// Fetch all tags
-	tags, err := h.DB.GetTags()
+	tags, err := h.DB.GetTags(ctx)
 	checkError(err)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -235,6 +243,8 @@ func (h *handler) apiGetTags(w http.ResponseWriter, r *http.Request, ps httprout
 
 // apiRenameTag is handler for PUT /api/tag
 func (h *handler) apiRenameTag(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -245,7 +255,7 @@ func (h *handler) apiRenameTag(w http.ResponseWriter, r *http.Request, ps httpro
 	checkError(err)
 
 	// Update name
-	err = h.DB.RenameTag(tag.ID, tag.Name)
+	err = h.DB.RenameTag(ctx, tag.ID, tag.Name)
 	checkError(err)
 
 	fmt.Fprint(w, 1)
@@ -273,6 +283,8 @@ func newAPIInsertBookmarkPayload() *apiInsertBookmarkPayload {
 
 // apiInsertBookmark is handler for POST /api/bookmark
 func (h *handler) apiInsertBookmark(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -291,12 +303,6 @@ func (h *handler) apiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 		CreateArchive: payload.CreateArchive,
 	}
 
-	// Create bookmark ID
-	book.ID, err = h.DB.CreateNewID("bookmark")
-	if err != nil {
-		panic(fmt.Errorf("failed to create ID: %v", err))
-	}
-
 	// Clean up bookmark URL
 	book.URL, err = core.RemoveUTMParams(book.URL)
 	if err != nil {
@@ -308,29 +314,32 @@ func (h *handler) apiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 		book.Title = book.URL
 	}
 
-	if !payload.Async {
-		book, err = downloadBookmarkContent(book, h.DataDir, r)
-		if err != nil {
-			log.Printf("error downloading boorkmark: %s", err)
-		}
-	}
-
 	// Save bookmark to database
-	results, err := h.DB.SaveBookmarks(*book)
+	results, err := h.DB.SaveBookmarks(ctx, *book)
 	if err != nil || len(results) == 0 {
 		panic(fmt.Errorf("failed to save bookmark: %v", err))
 	}
 
 	if payload.Async {
 		go func() {
-			bookmark, err := downloadBookmarkContent(book, h.DataDir, r)
+			bookmark, err := downloadBookmarkContent(&results[0], h.DataDir, r)
 			if err != nil {
 				log.Printf("error downloading boorkmark: %s", err)
 			}
-			if _, err := h.DB.SaveBookmarks(*bookmark); err != nil {
+			if _, err := h.DB.SaveBookmarks(ctx, *bookmark); err != nil {
 				log.Printf("failed to save bookmark: %s", err)
 			}
 		}()
+	} else {
+		// Workaround. Download content after saving the bookmark so we have the proper database
+		// id already set in the object regardless of the database engine.
+		book, err = downloadBookmarkContent(book, h.DataDir, r)
+		if err != nil {
+			log.Printf("error downloading boorkmark: %s", err)
+		}
+		if _, err := h.DB.SaveBookmarks(ctx, *book); err != nil {
+			log.Printf("failed to save bookmark: %s", err)
+		}
 	}
 
 	// Return the new bookmark
@@ -341,6 +350,8 @@ func (h *handler) apiInsertBookmark(w http.ResponseWriter, r *http.Request, ps h
 
 // apiDeleteBookmarks is handler for DELETE /api/bookmark
 func (h *handler) apiDeleteBookmark(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -351,7 +362,7 @@ func (h *handler) apiDeleteBookmark(w http.ResponseWriter, r *http.Request, ps h
 	checkError(err)
 
 	// Delete bookmarks
-	err = h.DB.DeleteBookmarks(ids...)
+	err = h.DB.DeleteBookmarks(ctx, ids...)
 	checkError(err)
 
 	// Delete thumbnail image and archives from local disk
@@ -369,6 +380,8 @@ func (h *handler) apiDeleteBookmark(w http.ResponseWriter, r *http.Request, ps h
 
 // apiUpdateBookmark is handler for PUT /api/bookmarks
 func (h *handler) apiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -380,7 +393,7 @@ func (h *handler) apiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 
 	// Validate input
 	if request.Title == "" {
-		panic(fmt.Errorf("Title must not empty"))
+		panic(fmt.Errorf("title must not empty"))
 	}
 
 	// Get existing bookmark from database
@@ -389,7 +402,7 @@ func (h *handler) apiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 		WithContent: true,
 	}
 
-	bookmarks, err := h.DB.GetBookmarks(filter)
+	bookmarks, err := h.DB.GetBookmarks(ctx, filter)
 	checkError(err)
 	if len(bookmarks) == 0 {
 		panic(fmt.Errorf("no bookmark with matching ids"))
@@ -428,7 +441,7 @@ func (h *handler) apiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 	}
 
 	// Update database
-	res, err := h.DB.SaveBookmarks(book)
+	res, err := h.DB.SaveBookmarks(ctx, book)
 	checkError(err)
 
 	// Add thumbnail image to the saved bookmarks again
@@ -444,6 +457,8 @@ func (h *handler) apiUpdateBookmark(w http.ResponseWriter, r *http.Request, ps h
 
 // apiUpdateCache is handler for PUT /api/cache
 func (h *handler) apiUpdateCache(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -464,7 +479,7 @@ func (h *handler) apiUpdateCache(w http.ResponseWriter, r *http.Request, ps http
 		WithContent: true,
 	}
 
-	bookmarks, err := h.DB.GetBookmarks(filter)
+	bookmarks, err := h.DB.GetBookmarks(ctx, filter)
 	checkError(err)
 	if len(bookmarks) == 0 {
 		panic(fmt.Errorf("no bookmark with matching ids"))
@@ -550,7 +565,7 @@ func (h *handler) apiUpdateCache(w http.ResponseWriter, r *http.Request, ps http
 	close(chDone)
 
 	// Update database
-	_, err = h.DB.SaveBookmarks(bookmarks...)
+	_, err = h.DB.SaveBookmarks(ctx, bookmarks...)
 	checkError(err)
 
 	// Return new saved result
@@ -561,6 +576,8 @@ func (h *handler) apiUpdateCache(w http.ResponseWriter, r *http.Request, ps http
 
 // apiUpdateBookmarkTags is handler for PUT /api/bookmarks/tags
 func (h *handler) apiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -585,7 +602,7 @@ func (h *handler) apiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 		WithContent: true,
 	}
 
-	bookmarks, err := h.DB.GetBookmarks(filter)
+	bookmarks, err := h.DB.GetBookmarks(ctx, filter)
 	checkError(err)
 	if len(bookmarks) == 0 {
 		panic(fmt.Errorf("no bookmark with matching ids"))
@@ -610,7 +627,7 @@ func (h *handler) apiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Update database
-	bookmarks, err = h.DB.SaveBookmarks(bookmarks...)
+	bookmarks, err = h.DB.SaveBookmarks(ctx, bookmarks...)
 	checkError(err)
 
 	// Get image URL for each bookmark
@@ -631,12 +648,14 @@ func (h *handler) apiUpdateBookmarkTags(w http.ResponseWriter, r *http.Request, 
 
 // apiGetAccounts is handler for GET /api/accounts
 func (h *handler) apiGetAccounts(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
 
 	// Get list of usernames from database
-	accounts, err := h.DB.GetAccounts(database.GetAccountsOptions{})
+	accounts, err := h.DB.GetAccounts(ctx, database.GetAccountsOptions{})
 	checkError(err)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -646,6 +665,8 @@ func (h *handler) apiGetAccounts(w http.ResponseWriter, r *http.Request, ps http
 
 // apiInsertAccount is handler for POST /api/accounts
 func (h *handler) apiInsertAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -656,7 +677,7 @@ func (h *handler) apiInsertAccount(w http.ResponseWriter, r *http.Request, ps ht
 	checkError(err)
 
 	// Save account to database
-	err = h.DB.SaveAccount(account)
+	err = h.DB.SaveAccount(ctx, account)
 	checkError(err)
 
 	fmt.Fprint(w, 1)
@@ -664,6 +685,8 @@ func (h *handler) apiInsertAccount(w http.ResponseWriter, r *http.Request, ps ht
 
 // apiUpdateAccount is handler for PUT /api/accounts
 func (h *handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -680,7 +703,9 @@ func (h *handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, ps ht
 	checkError(err)
 
 	// Get existing account data from database
-	account, exist := h.DB.GetAccount(request.Username)
+	account, exist, err := h.DB.GetAccount(ctx, request.Username)
+	checkError(err)
+
 	if !exist {
 		panic(fmt.Errorf("username doesn't exist"))
 	}
@@ -694,7 +719,7 @@ func (h *handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, ps ht
 	// Save new password to database
 	account.Password = request.NewPassword
 	account.Owner = request.Owner
-	err = h.DB.SaveAccount(account)
+	err = h.DB.SaveAccount(ctx, account)
 	checkError(err)
 
 	// Delete user's sessions
@@ -712,6 +737,8 @@ func (h *handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, ps ht
 
 // apiDeleteAccount is handler for DELETE /api/accounts
 func (h *handler) apiDeleteAccount(w http.ResponseWriter, r *http.Request, ps httprouter.Params) {
+	ctx := r.Context()
+
 	// Make sure session still valid
 	err := h.validateSession(r)
 	checkError(err)
@@ -722,7 +749,7 @@ func (h *handler) apiDeleteAccount(w http.ResponseWriter, r *http.Request, ps ht
 	checkError(err)
 
 	// Delete accounts
-	err = h.DB.DeleteAccounts(usernames...)
+	err = h.DB.DeleteAccounts(ctx, usernames...)
 	checkError(err)
 
 	// Delete user's sessions
